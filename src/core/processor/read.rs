@@ -66,6 +66,10 @@ pub fn process_changes(id: Ref, tree: &mut Tree, vfs: &Vfs) -> Option<Changes> {
 }
 
 fn process_child_changes(id: Ref, mut snapshot: Snapshot, changes: &mut Changes, tree: &mut Tree) {
+	if let Err(err) = remap_imported_refs(&mut snapshot, id, tree) {
+		error!("Refusing model change with unresolved reference: {err}");
+		return;
+	}
 	// Process instance changes
 	let mut updated_snapshot = UpdatedSnapshot::new(id);
 
@@ -155,6 +159,43 @@ fn process_child_changes(id: Ref, mut snapshot: Snapshot, changes: &mut Changes,
 	}
 }
 
+// A fresh deserialize has fresh model ids; matched live children keep their session ids.
+// Map the entire subtree first so forward and sibling references are independent of traversal order.
+fn remap_imported_refs(snapshot: &mut Snapshot, id: Ref, tree: &Tree) -> anyhow::Result<()> {
+	use std::collections::HashMap;
+	use rbx_dom_weak::types::Variant;
+	fn collect(node: &Snapshot, target: Option<Ref>, tree: &Tree, map: &mut HashMap<Ref, Ref>) {
+		if node.source_id.is_some() {
+			map.insert(node.source_id, target.unwrap_or(node.source_id));
+		}
+		let children = target.and_then(|id| tree.get_instance(id)).map(|n| n.children().to_vec()).unwrap_or_default();
+		let mut used = vec![false; children.len()];
+		for child in &node.children {
+			let matched = children.iter().enumerate().find(|(i, id)| {
+				let existing = tree.get_instance(**id).unwrap();
+				!used[*i] && existing.name == child.name && existing.class == child.class
+			}).map(|(i, id)| { used[i] = true; *id });
+			collect(child, matched, tree, map);
+		}
+	}
+	fn apply(node: &mut Snapshot, tree: &Tree, map: &HashMap<Ref, Ref>) -> anyhow::Result<()> {
+		for (property, value) in &mut node.properties {
+			if let Variant::Ref(reference) = value {
+				if let Some(target) = map.get(reference) {
+					*reference = *target;
+				} else if reference.is_some() && tree.get_instance(*reference).is_none() {
+					anyhow::bail!("{}.{} -> {:?}", node.name, property, reference);
+				}
+			}
+		}
+		for child in &mut node.children { apply(child, tree, map)?; }
+		Ok(())
+	}
+	let mut map = HashMap::new();
+	collect(snapshot, Some(id), tree, &mut map);
+	apply(snapshot, tree, &map)
+}
+
 fn insert_children(snapshot: &mut Snapshot, parent: Ref, tree: &mut Tree) {
 	let id = tree.insert_instance(snapshot.clone(), parent);
 
@@ -163,4 +204,65 @@ fn insert_children(snapshot: &mut Snapshot, parent: Ref, tree: &mut Tree) {
 	for child in snapshot.children.iter_mut() {
 		insert_children(child, id, tree);
 	}
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+    use rbx_dom_weak::{InstanceBuilder, WeakDom, types::Variant};
+    fn fixture() -> Snapshot {
+        let mut dom = WeakDom::new(InstanceBuilder::new("Model").with_name("Fixture"));
+        let root = dom.root_ref();
+        let part = dom.insert(root, InstanceBuilder::new("Part").with_name("Handle"));
+        dom.get_by_ref_mut(root).unwrap().properties.insert("PrimaryPart".into(), Variant::Ref(part));
+        crate::middleware::helpers::snapshot_from_dom(dom, root)
+    }
+    #[test]
+    fn reload_retains_existing_reference_identity() {
+        let mut tree = Tree::new(fixture());
+        let root = tree.root_ref();
+        let handle = tree.root().children()[0];
+        let mut changes = Changes::new();
+        process_child_changes(root, fixture(), &mut changes, &mut tree);
+        assert_eq!(tree.root().children()[0], handle);
+        assert_eq!(tree.root().properties[&"PrimaryPart".into()], Variant::Ref(handle));
+        assert!(changes.additions.is_empty());
+        assert!(changes.removals.is_empty());
+    }
+
+    #[test]
+    fn reload_addition_can_reference_existing_sibling() {
+        let mut tree = Tree::new(fixture());
+        let root = tree.root_ref();
+        let handle = tree.root().children()[0];
+        let mut snapshot = fixture();
+        let imported_handle = snapshot.children[0].source_id;
+        let mut mount = Snapshot::new().with_name("Mount").with_class("Weld");
+        mount.properties.insert("Part0".into(), Variant::Ref(imported_handle));
+        mount.properties.insert("Part1".into(), Variant::Ref(imported_handle));
+        snapshot.children.push(mount);
+        let mut changes = Changes::new();
+        process_child_changes(root, snapshot, &mut changes, &mut tree);
+        let mount = tree.root().children().iter().find_map(|id| {
+            let n = tree.get_instance(*id).unwrap(); if n.name == "Mount" {Some(n)} else {None}
+        }).unwrap();
+        assert_eq!(mount.properties[&"Part0".into()], Variant::Ref(handle));
+        assert_eq!(mount.properties[&"Part1".into()], Variant::Ref(handle));
+        tree.validate_references().unwrap();
+    }
+
+    #[test]
+    fn bad_reload_preserves_previous_tree() {
+        let mut tree = Tree::new(fixture());
+        let root = tree.root_ref();
+        let handle = tree.root().children()[0];
+        let mut snapshot = fixture();
+        snapshot.children.clear();
+        snapshot.name = "Invalid".into();
+        let mut changes = Changes::new();
+        process_child_changes(root, snapshot, &mut changes, &mut tree);
+        assert_eq!(tree.root().name, "Fixture");
+        assert_eq!(tree.root().children(), &[handle]);
+        assert!(changes.is_empty());
+    }
 }

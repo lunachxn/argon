@@ -11,6 +11,9 @@ use crate::{middleware::data::DataSnapshot, Properties};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
 	pub id: Ref,
+	// Imported model identity. Keep it separate from the session id and hydration's existing-child flag.
+	#[serde(skip, default = "Ref::none")]
+	pub source_id: Ref,
 	pub meta: Meta,
 
 	// Roblox related
@@ -26,6 +29,7 @@ impl Snapshot {
 	pub fn new() -> Self {
 		Self {
 			id: Ref::none(),
+			source_id: Ref::none(),
 			meta: Meta::new(),
 			name: String::new(),
 			class: Ustr::from("Folder"),
@@ -36,6 +40,11 @@ impl Snapshot {
 
 	pub fn with_id(mut self, id: Ref) -> Self {
 		self.set_id(id);
+		self
+	}
+
+	pub fn with_source_id(mut self, id: Ref) -> Self {
+		self.source_id = id;
 		self
 	}
 
@@ -203,6 +212,7 @@ impl From<AddedSnapshot> for Snapshot {
 	fn from(snapshot: AddedSnapshot) -> Self {
 		Self {
 			id: snapshot.id,
+			source_id: Ref::none(),
 			meta: snapshot.meta,
 			name: snapshot.name,
 			class: snapshot.class,

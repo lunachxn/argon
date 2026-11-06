@@ -20,6 +20,7 @@ impl Tree {
 		let builder = InstanceBuilder::new(snapshot.class)
 			.with_name(snapshot.name)
 			.with_properties(snapshot.properties);
+		let builder = if snapshot.source_id.is_some() { builder.with_referent(snapshot.source_id) } else { builder };
 
 		let mut tree = Self {
 			dom: WeakDom::new(builder),
@@ -42,6 +43,7 @@ impl Tree {
 		let builder = InstanceBuilder::new(snapshot.class)
 			.with_name(snapshot.meta.original_name.as_ref().unwrap_or(&snapshot.name))
 			.with_properties(snapshot.properties);
+		let builder = if snapshot.source_id.is_some() { builder.with_referent(snapshot.source_id) } else { builder };
 
 		let id = self.dom.insert(parent, builder);
 
@@ -54,6 +56,7 @@ impl Tree {
 		let builder = InstanceBuilder::new(snapshot.class)
 			.with_name(snapshot.meta.original_name.as_ref().unwrap_or(&snapshot.name))
 			.with_properties(snapshot.properties);
+		let builder = if snapshot.source_id.is_some() { builder.with_referent(snapshot.source_id) } else { builder };
 
 		let id = self.dom.insert(parent, builder);
 
@@ -193,6 +196,20 @@ impl Tree {
 
 	pub fn root(&self) -> &Instance {
 		self.dom.root()
+	}
+
+	pub fn validate_references(&self) -> anyhow::Result<()> {
+		for id in self.id_to_meta.keys() {
+			let instance = self.get_instance(*id).expect("Tree metadata without instance");
+			for (property, value) in &instance.properties {
+				if let rbx_dom_weak::types::Variant::Ref(target) = value {
+					if target.is_some() && self.get_instance(*target).is_none() {
+						anyhow::bail!("Unresolved model reference: {}.{} -> {:?}", instance.name, property, target);
+					}
+				}
+			}
+		}
+		Ok(())
 	}
 
 	pub fn root_ref(&self) -> Ref {

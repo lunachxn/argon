@@ -24,7 +24,7 @@ use crate::{
 	Properties,
 };
 
-mod helpers;
+pub(crate) mod helpers;
 
 pub mod csv;
 pub mod data;

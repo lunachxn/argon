@@ -56,7 +56,9 @@ impl Core {
 		trace!("Building Tree and Queue");
 
 		let vfs = Arc::new(vfs);
-		let tree = Arc::new(Mutex::new(Tree::new(snapshot)));
+		let tree = Tree::new(snapshot);
+		tree.validate_references()?;
+		let tree = Arc::new(Mutex::new(tree));
 		let queue = Arc::new(Queue::new());
 
 		trace!("Starting Processor");
@@ -111,6 +113,10 @@ impl Core {
 	/// Create snapshot of the tree or a subtree
 	pub fn snapshot(&self, instance: Ref) -> Option<AddedSnapshot> {
 		let tree = self.tree();
+		if let Err(err) = tree.validate_references() {
+			log::error!("Refusing snapshot with unresolved references: {err}");
+			return None;
+		}
 
 		fn walk(children: &[Ref], tree: &Tree) -> Vec<Snapshot> {
 			let mut snapshot_children = Vec::new();
